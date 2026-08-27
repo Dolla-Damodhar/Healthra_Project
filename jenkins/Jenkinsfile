@@ -2,6 +2,9 @@ pipeline {
     agent any
 
     environment {
+        // Add common macOS paths for docker, aws, and kubectl
+        PATH           = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
+        
         AWS_ACCOUNT_ID = '447356677831' // Replace with your AWS account ID
         AWS_REGION     = 'us-east-1'     // Replace with your AWS region
         ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -29,6 +32,7 @@ pipeline {
                     cd backend
                     python3 -m venv venv
                     . venv/bin/activate
+                    python3 -m pip install --upgrade pip
                     pip install -r requirements.txt
                     # Run backend tests
                     DEBUG=True USE_SQLITE=True python manage.py test
