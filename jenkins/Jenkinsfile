@@ -1,0 +1,123 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_ACCOUNT_ID = '123456789012' // Replace with your AWS account ID
+        AWS_REGION     = 'us-east-1'     // Replace with your AWS region
+        ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        
+        BACKEND_REPO   = 'healthra-backend'
+        FRONTEND_REPO  = 'healthra-frontend'
+        
+        // Base API URL for frontend compile-time building. 
+        // Replace with your actual domain or ALB endpoint URL.
+        VITE_HEALTHRA_BASEURL = 'http://healthra-api.local/api/' 
+        
+        IMAGE_TAG      = "${env.GIT_COMMIT.take(7)}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Backend Unit Tests') {
+            steps {
+                sh '''
+                    cd backend
+                    python3 -m venv venv
+                    . venv/bin/activate
+                    pip install -r requirements.txt
+                    # Run backend tests
+                    DEBUG=True USE_SQLITE=True python manage.py test
+                '''
+            }
+        }
+
+        stage('Frontend Verification') {
+            steps {
+                sh '''
+                    cd frontend
+                    npm ci
+                    npm run lint --if-present
+                '''
+            }
+        }
+
+        stage('AWS ECR Login') {
+            steps {
+                // Requires Jenkins AWS Steps / AWS Credentials plugin configured
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}"
+                }
+            }
+        }
+
+        stage('Build & Push Backend Image') {
+            steps {
+                sh """
+                    docker build -t ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG} -t ${ECR_REGISTRY}/${BACKEND_REPO}:latest ./backend
+                    docker push ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
+                    docker push ${ECR_REGISTRY}/${BACKEND_REPO}:latest
+                """
+            }
+        }
+
+        stage('Build & Push Frontend Image') {
+            steps {
+                // Pass VITE_HEALTHRA_BASEURL as build-arg so Vite compiles it into frontend assets
+                sh """
+                    docker build --build-arg VITE_HEALTHRA_BASEURL=${VITE_HEALTHRA_BASEURL} \
+                        -t ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG} \
+                        -t ${ECR_REGISTRY}/${FRONTEND_REPO}:latest ./frontend
+                    docker push ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
+                    docker push ${ECR_REGISTRY}/${FRONTEND_REPO}:latest
+                """
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                // Requires Jenkins EKS / kubeconfig configuration or withKubeConfig plugin
+                withKubeConfig([credentialsId: 'eks-kubeconfig']) {
+                    sh """
+                        # Substitute environment placeholders in k8s deployment templates
+                        sed -i "s|\\\${AWS_ACCOUNT_ID}|${AWS_ACCOUNT_ID}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
+                        sed -i "s|\\\${AWS_REGION}|${AWS_REGION}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
+                        sed -i "s|\\\${IMAGE_TAG}|${IMAGE_TAG}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
+                        
+                        # Apply Kubernetes manifests
+                        kubectl apply -f kubernetes/namespace.yaml
+                        kubectl apply -f kubernetes/secrets.yaml
+                        kubectl apply -f kubernetes/backend-service.yaml
+                        kubectl apply -f kubernetes/backend-deployment.yaml
+                        kubectl apply -f kubernetes/frontend-service.yaml
+                        kubectl apply -f kubernetes/frontend-deployment.yaml
+                        kubectl apply -f kubernetes/ingress.yaml
+                        
+                        # Verify deployment rollout
+                        kubectl rollout status deployment/healthra-backend -n healthra --timeout=150s
+                        kubectl rollout status deployment/healthra-frontend -n healthra --timeout=150s
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up workspace images to save disk space on Jenkins runner
+            sh "docker rmi ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG} || true"
+            sh "docker rmi ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG} || true"
+        }
+        success {
+            echo 'Deployment completed successfully!'
+        }
+        failure {
+            echo 'Deployment failed. Please check the logs.'
+        }
+    }
+}
+

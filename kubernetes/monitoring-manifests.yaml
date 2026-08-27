@@ -1,0 +1,32 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: healthra-backend-monitor
+  namespace: healthra
+  labels:
+    release: prometheus # Should match the label selector of your Prometheus Operator installation
+spec:
+  selector:
+    matchLabels:
+      app: healthra-backend
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: healthra-frontend-monitor
+  namespace: healthra
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: healthra-frontend
+  endpoints:
+  - port: http
+    path: /
+    interval: 30s
+
