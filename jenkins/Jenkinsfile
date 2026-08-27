@@ -85,19 +85,19 @@ pipeline {
 
         stage('Deploy to EKS') {
             steps {
-                sh """
+                sh '''
                     # Substitute environment placeholders in k8s deployment templates using Python
-                    python3 -c "
+                    python3 -c '
 import sys
-for filepath in ['kubernetes/backend-deployment.yaml', 'kubernetes/frontend-deployment.yaml']:
-    with open(filepath, 'r') as f:
+for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-deployment.yaml"]:
+    with open(filepath, "r") as f:
         content = f.read()
-    content = content.replace('\${AWS_ACCOUNT_ID}', sys.argv[1])
-    content = content.replace('\${AWS_REGION}', sys.argv[2])
-    content = content.replace('\${IMAGE_TAG}', sys.argv[3])
-    with open(filepath, 'w') as f:
+    content = content.replace("${AWS_ACCOUNT_ID}", sys.argv[1])
+    content = content.replace("${AWS_REGION}", sys.argv[2])
+    content = content.replace("${IMAGE_TAG}", sys.argv[3])
+    with open(filepath, "w") as f:
         f.write(content)
-                    " "${AWS_ACCOUNT_ID}" "${AWS_REGION}" "${IMAGE_TAG}"
+                    ' "${AWS_ACCOUNT_ID}" "${AWS_REGION}" "${IMAGE_TAG}"
                     
                     # Apply Kubernetes manifests
                     kubectl apply -f kubernetes/namespace.yaml
@@ -111,7 +111,7 @@ for filepath in ['kubernetes/backend-deployment.yaml', 'kubernetes/frontend-depl
                     # Verify deployment rollout
                     kubectl rollout status deployment/healthra-backend -n healthra --timeout=150s
                     kubectl rollout status deployment/healthra-frontend -n healthra --timeout=150s
-                """
+                '''
             }
         }
     }
