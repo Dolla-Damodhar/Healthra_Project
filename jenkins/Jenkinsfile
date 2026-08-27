@@ -53,8 +53,8 @@ pipeline {
 
         stage('AWS ECR Login') {
             steps {
-                // Requires Jenkins AWS Steps / AWS Credentials plugin configured
-                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                // Uses built-in credentials binding (requires credential type "Username with password")
+                withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}"
                 }
             }
