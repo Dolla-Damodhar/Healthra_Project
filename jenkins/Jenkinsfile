@@ -85,28 +85,25 @@ pipeline {
 
         stage('Deploy to EKS') {
             steps {
-                // Requires Jenkins EKS / kubeconfig configuration or withKubeConfig plugin
-                withKubeConfig([credentialsId: 'eks-kubeconfig']) {
-                    sh """
-                        # Substitute environment placeholders in k8s deployment templates
-                        sed -i "s|\\\${AWS_ACCOUNT_ID}|${AWS_ACCOUNT_ID}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
-                        sed -i "s|\\\${AWS_REGION}|${AWS_REGION}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
-                        sed -i "s|\\\${IMAGE_TAG}|${IMAGE_TAG}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
-                        
-                        # Apply Kubernetes manifests
-                        kubectl apply -f kubernetes/namespace.yaml
-                        kubectl apply -f kubernetes/secrets.yaml
-                        kubectl apply -f kubernetes/backend-service.yaml
-                        kubectl apply -f kubernetes/backend-deployment.yaml
-                        kubectl apply -f kubernetes/frontend-service.yaml
-                        kubectl apply -f kubernetes/frontend-deployment.yaml
-                        kubectl apply -f kubernetes/ingress.yaml
-                        
-                        # Verify deployment rollout
-                        kubectl rollout status deployment/healthra-backend -n healthra --timeout=150s
-                        kubectl rollout status deployment/healthra-frontend -n healthra --timeout=150s
-                    """
-                }
+                sh """
+                    # Substitute environment placeholders in k8s deployment templates
+                    sed -i "s|\\\${AWS_ACCOUNT_ID}|${AWS_ACCOUNT_ID}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
+                    sed -i "s|\\\${AWS_REGION}|${AWS_REGION}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
+                    sed -i "s|\\\${IMAGE_TAG}|${IMAGE_TAG}|g" kubernetes/backend-deployment.yaml kubernetes/frontend-deployment.yaml
+                    
+                    # Apply Kubernetes manifests
+                    kubectl apply -f kubernetes/namespace.yaml
+                    kubectl apply -f kubernetes/secrets.yaml
+                    kubectl apply -f kubernetes/backend-service.yaml
+                    kubectl apply -f kubernetes/backend-deployment.yaml
+                    kubectl apply -f kubernetes/frontend-service.yaml
+                    kubectl apply -f kubernetes/frontend-deployment.yaml
+                    kubectl apply -f kubernetes/ingress.yaml
+                    
+                    # Verify deployment rollout
+                    kubectl rollout status deployment/healthra-backend -n healthra --timeout=150s
+                    kubectl rollout status deployment/healthra-frontend -n healthra --timeout=150s
+                """
             }
         }
     }
