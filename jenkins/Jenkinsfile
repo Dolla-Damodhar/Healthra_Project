@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        AWS_ACCOUNT_ID = '123456789012' // Replace with your AWS account ID
+        AWS_ACCOUNT_ID = '447356677831' // Replace with your AWS account ID
         AWS_REGION     = 'us-east-1'     // Replace with your AWS region
         ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         
