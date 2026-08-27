@@ -2,8 +2,8 @@ pipeline {
     agent any
 
     environment {
-        // Add common macOS paths for docker, aws, and kubectl
-        PATH           = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
+        // Add common macOS paths including Python 3.12 and docker
+        PATH           = "/Library/Frameworks/Python.framework/Versions/3.12/bin:/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
         
         AWS_ACCOUNT_ID = '447356677831' // Replace with your AWS account ID
         AWS_REGION     = 'us-east-1'     // Replace with your AWS region
