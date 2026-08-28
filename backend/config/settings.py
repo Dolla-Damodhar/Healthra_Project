@@ -15,6 +15,14 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-me-in-prod')
 DEBUG = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
 
+# TLS terminates at the ingress (ingress-nginx), and the connection from
+# there to this app is plain HTTP - without this, request.is_secure() is
+# always False, so Django computes its CSRF "expected origin" as http://
+# while the browser correctly sends Origin: https://, and every POST gets
+# rejected with "CSRF Failed: origin checking failed". ingress-nginx sets
+# X-Forwarded-Proto based on the real (TLS) connection it received.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 # --------------------------------------------------------------------------
 # Applications
 # --------------------------------------------------------------------------
