@@ -7,11 +7,18 @@
 - **Database**: RDS Postgres `healthra-db` (db.t3.micro, private subnets, not
   publicly accessible; security group `healthra-rds-sg` allows port 5432 only
   from the EKS cluster security group)
-- **Ingress**: a single ALB (via the `alb.ingress.kubernetes.io` annotations
-  on `kubernetes/ingress.yaml`) routes `/` to the frontend and `/api`, `/admin`
-  to the backend — frontend and backend are same-origin, which is why the
-  frontend is built with a relative `VITE_HEALTHRA_BASEURL=/api/` and the
-  backend uses cookie-based auth.
+- **Ingress**: `ingress-nginx` (installed via Helm) behind a Network Load
+  Balancer bound to a static Elastic IP (`44.219.226.81`, allocation
+  `eipalloc-0f16e43e30d0d677a`) routes `/` to the frontend and `/api`,
+  `/admin` to the backend, on the custom domain `healthraa.duckdns.org` —
+  frontend and backend are same-origin, which is why the frontend is built
+  with a relative `VITE_HEALTHRA_BASEURL=/api/` and the backend uses
+  cookie-based auth. TLS is a free, auto-renewing Let's Encrypt certificate
+  issued by cert-manager. See "Custom domain + HTTPS" below for why this
+  isn't a plain ALB + ACM setup and how it's wired up. The original ALB
+  ingress controller (still installed, used only by future ALB-class
+  resources if ever needed) auto-deleted the old ALB once the Ingress
+  switched to the `nginx` class.
 - **Monitoring**: kube-prometheus-stack (Prometheus Operator + Prometheus +
   Grafana + Alertmanager) installed via Helm into the `monitoring` namespace.
   The `healthra` app's `ServiceMonitor` (backend `/metrics` via
@@ -171,10 +178,14 @@ on the GitHub repo pointing at `<jenkins-url>/github-webhook/`.
    Apple Silicon (arm64); without it, images built here fail on the amd64 EKS
    nodes with `exec format error` (this is what caused the initial outage).
 6. **Configure kubectl** — `aws eks update-kubeconfig`
-7. **Deploy to EKS** — applies namespace/configmap/secret, runs a one-off
-   `migrate-job.yaml` Kubernetes Job for Django migrations against RDS
-   *before* rolling out new backend pods, then applies services/deployments/
-   ingress and waits for rollout.
+7. **Deploy to EKS** — applies namespace/configmap/ClusterIssuer/secret, runs
+   a one-off `migrate-job.yaml` Kubernetes Job for Django migrations against
+   RDS *before* rolling out new backend pods, then applies
+   services/deployments/ingress and waits for rollout. All `kubectl` calls
+   use `--request-timeout=60s --validate=false` — the connection from this
+   Jenkins agent to the EKS API has repeatedly been slow enough that
+   `apply`'s default OpenAPI schema download times out; skipping client-side
+   validation avoids that without disabling anything server-side.
 8. **Deploy Monitoring** — applies the `ServiceMonitor` for the backend and
    packages `kubernetes/grafana-dashboard.json` into a labeled `ConfigMap`
    (`grafana_dashboard=1`) so Grafana's sidecar auto-imports it.
@@ -193,13 +204,92 @@ memory, Django request rate, DB query rate) should appear automatically
 within a minute of the pipeline's "Deploy Monitoring" stage running, under
 Dashboards.
 
+## Custom domain + HTTPS
+
+`healthraa.duckdns.org` (free DuckDNS subdomain) points at the app. Two
+constraints shaped this differently from the "ACM cert + ALB" default:
+
+- **DuckDNS only supports A records** (no CNAME), but an ALB has no static
+  IP — its underlying IPs can change at any time. Pointing an A record at a
+  snapshot of an ALB's IP would eventually break.
+- **AWS ACM can't issue a certificate for `healthraa.duckdns.org`** — ACM
+  validates domain ownership, which isn't possible for a subdomain of a
+  registrar-level domain (`duckdns.org`) this account doesn't control.
+
+So instead: an Elastic IP gives a genuinely static address, `ingress-nginx`
+(not the ALB controller) terminates TLS directly using a cert-manager /
+Let's Encrypt certificate (HTTP-01 validation, which only needs the domain
+to resolve to something that can answer the challenge — it doesn't care who
+owns the parent domain).
+
+```
+Internet
+   |
+   v
+Elastic IP 44.219.226.81 (static)
+   |
+   v
+Network Load Balancer (AWS Load Balancer Controller, target-type=ip)
+   |
+   v
+ingress-nginx controller  <-- cert-manager auto-renews the Let's Encrypt cert
+   |
+   +--> /        healthra-frontend
+   +--> /api     healthra-backend
+   +--> /admin   healthra-backend
+
+DuckDNS A record: healthraa.duckdns.org -> 44.219.226.81  (set once, manually)
+```
+
+One-time setup (already done):
+
+```bash
+# Static IP for the ingress
+aws ec2 allocate-address --domain vpc \
+  --tag-specifications 'ResourceType=elastic-ip,Tags=[{Key=Name,Value=healthra-ingress-eip}]'
+
+# ingress-nginx behind an NLB bound to that EIP, in a single AZ (matching
+# the single EIP — see note below on why the controller is pinned to a zone)
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace \
+  --set controller.service.type=LoadBalancer \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=external \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type"=ip \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-subnets"=<PUBLIC_SUBNET_ID> \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-eip-allocations"=<EIP_ALLOCATION_ID> \
+  --set controller.ingressClassResource.name=nginx \
+  --set controller.ingressClassResource.default=false \
+  --set controller.nodeSelector."topology\.kubernetes\.io/zone"=<AZ_OF_THAT_SUBNET>
+
+# cert-manager
+helm repo add jetstack https://charts.jetstack.io
+helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace --set crds.enabled=true
+
+kubectl apply -f kubernetes/cluster-issuer.yaml
+```
+
+**Why `controller.nodeSelector` pins the ingress-nginx pod to one AZ**: the
+NLB is only bound to one subnet/AZ (to keep it to a single EIP). An NLB
+target in an AZ the load balancer isn't configured for shows as
+`Target.NotInUse` and silently never receives traffic — connections just
+hang. With only 1 ingress-nginx replica, Kubernetes could otherwise schedule
+it onto the node in the *other* AZ, which is exactly what happened the first
+time and looked like a stuck cert-manager HTTP-01 challenge (self-check
+timing out) before the real cause — an AZ mismatch — was found. If this ever
+needs multi-AZ ingress HA, that requires a second EIP + adding the second
+public subnet to `aws-load-balancer-subnets`/`aws-load-balancer-eip-allocations`,
+and DuckDNS can still only be pointed at one of the two IPs.
+
+**Renewal**: cert-manager renews automatically (default ~30 days before the
+90-day Let's Encrypt expiry) as long as `healthraa.duckdns.org` keeps
+resolving to `44.219.226.81` — no action needed unless the EIP is ever
+deallocated. If DuckDNS's own IP is ever changed, cert-manager also needs
+the ClusterIssuer's HTTP-01 solver to reach the new address for the next
+renewal to succeed.
+
 ## Known follow-ups / not done here
 
-- `CORS_ALLOWED_ORIGINS` / `CSRF_TRUSTED_ORIGINS` in
-  `kubernetes/backend-deployment.yaml` are still `http://localhost,http://127.0.0.1`
-  placeholders. Harmless while there's no custom domain (frontend/backend are
-  same-origin via the ALB's own hostname), but should be updated if/when a
-  real domain + TLS (ACM cert, commented out in `ingress.yaml`) is added.
 - The RDS instance is single-AZ (no standby) to keep cost down. Enable
   Multi-AZ if uptime during AZ failure/maintenance matters.
 - Grafana admin password and the DB/Django secrets were generated once during

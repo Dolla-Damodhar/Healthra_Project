@@ -133,31 +133,39 @@ for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-depl
         f.write(content)
                         ' "${AWS_ACCOUNT_ID}" "${AWS_REGION}" "${IMAGE_TAG}"
 
+                        # KUBECTL: a shorthand for consistent, hardened kubectl calls below.
+                        # --request-timeout guards against slow/flaky requests to the API
+                        # server; --validate=false skips the client-side OpenAPI schema
+                        # download that "apply" does by default, which has repeatedly been
+                        # the slow/flaky part in practice (not the actual apply).
+                        KUBECTL="kubectl --request-timeout=60s --validate=false"
+
                         # Apply Kubernetes manifests
-                        kubectl apply -f kubernetes/namespace.yaml
-                        kubectl apply -f kubernetes/configmap.yaml
+                        $KUBECTL apply -f kubernetes/namespace.yaml
+                        $KUBECTL apply -f kubernetes/configmap.yaml
+                        $KUBECTL apply -f kubernetes/cluster-issuer.yaml
 
                         # Generate the real Secret from Jenkins credentials at deploy time
                         # (production secret values never live in git - see kubernetes/secrets.yaml)
                         kubectl create secret generic healthra-secrets -n healthra \
                             --from-literal=django-secret-key="$DJANGO_SECRET_KEY" \
                             --from-literal=db-password="$DB_PASSWORD" \
-                            --dry-run=client -o yaml | kubectl apply -f -
+                            --dry-run=client -o yaml | $KUBECTL apply -f -
 
                         # Run DB migrations against RDS before rolling out new backend pods
-                        kubectl delete job healthra-migrate -n healthra --ignore-not-found
-                        kubectl apply -f kubernetes/migrate-job.yaml
-                        kubectl wait --for=condition=complete job/healthra-migrate -n healthra --timeout=180s
+                        $KUBECTL delete job healthra-migrate -n healthra --ignore-not-found
+                        $KUBECTL apply -f kubernetes/migrate-job.yaml
+                        $KUBECTL wait --for=condition=complete job/healthra-migrate -n healthra --timeout=180s
 
-                        kubectl apply -f kubernetes/backend-service.yaml
-                        kubectl apply -f kubernetes/backend-deployment.yaml
-                        kubectl apply -f kubernetes/frontend-service.yaml
-                        kubectl apply -f kubernetes/frontend-deployment.yaml
-                        kubectl apply -f kubernetes/ingress.yaml
+                        $KUBECTL apply -f kubernetes/backend-service.yaml
+                        $KUBECTL apply -f kubernetes/backend-deployment.yaml
+                        $KUBECTL apply -f kubernetes/frontend-service.yaml
+                        $KUBECTL apply -f kubernetes/frontend-deployment.yaml
+                        $KUBECTL apply -f kubernetes/ingress.yaml
 
                         # Verify deployment rollout
-                        kubectl rollout status deployment/healthra-backend -n healthra --timeout=150s
-                        kubectl rollout status deployment/healthra-frontend -n healthra --timeout=150s
+                        $KUBECTL rollout status deployment/healthra-backend -n healthra --timeout=150s
+                        $KUBECTL rollout status deployment/healthra-frontend -n healthra --timeout=150s
                     '''
                 }
             }
@@ -167,7 +175,9 @@ for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-depl
             steps {
                 withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     sh '''
-                        kubectl apply -f kubernetes/monitoring-manifests.yaml
+                        KUBECTL="kubectl --request-timeout=60s --validate=false"
+
+                        $KUBECTL apply -f kubernetes/monitoring-manifests.yaml
 
                         # Package the Grafana dashboard JSON as a labeled ConfigMap so the
                         # kube-prometheus-stack Grafana sidecar auto-imports it (searches all
@@ -176,7 +186,7 @@ for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-depl
                             --from-file=healthra-dashboard.json=kubernetes/grafana-dashboard.json \
                             --dry-run=client -o yaml \
                             | kubectl label --local -f - grafana_dashboard=1 -o yaml \
-                            | kubectl apply -f -
+                            | $KUBECTL apply -f -
                     '''
                 }
             }

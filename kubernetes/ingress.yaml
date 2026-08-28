@@ -4,15 +4,18 @@ metadata:
   name: healthra-ingress
   namespace: healthra
   annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    # Optional SSL Configuration (uncomment and replace with your ACM ARN if HTTPS is needed)
-    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
-    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/abc-123
+    # cert-manager watches this and requests/renews a Let's Encrypt cert via
+    # the HTTP-01 solver configured on the letsencrypt-prod ClusterIssuer.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - healthraa.duckdns.org
+    secretName: healthra-tls
   rules:
-  - http:
+  - host: healthraa.duckdns.org
+    http:
       paths:
       - path: /api
         pathType: Prefix
@@ -35,4 +38,3 @@ spec:
             name: healthra-frontend
             port:
               number: 80
-
