@@ -76,7 +76,9 @@ helm install prometheus prometheus-community/kube-prometheus-stack -n monitoring
 ```yaml
 grafana:
   service:
-    type: LoadBalancer
+    # ClusterIP: Grafana is reached via the shared ingress-nginx + static-EIP
+    # setup (kubernetes/grafana-ingress.yaml), not its own ELB.
+    type: ClusterIP
   persistence:
     enabled: true
     size: 5Gi
@@ -186,16 +188,20 @@ on the GitHub repo pointing at `<jenkins-url>/github-webhook/`.
    Jenkins agent to the EKS API has repeatedly been slow enough that
    `apply`'s default OpenAPI schema download times out; skipping client-side
    validation avoids that without disabling anything server-side.
-8. **Deploy Monitoring** — applies the `ServiceMonitor` for the backend and
-   packages `kubernetes/grafana-dashboard.json` into a labeled `ConfigMap`
+8. **Deploy Monitoring** — applies the `ServiceMonitor` for the backend,
+   Grafana's Ingress (`kubernetes/grafana-ingress.yaml`), and packages
+   `kubernetes/grafana-dashboard.json` into a labeled `ConfigMap`
    (`grafana_dashboard=1`) so Grafana's sidecar auto-imports it.
 
 ## Accessing Grafana
 
-```bash
-kubectl get svc prometheus-grafana -n monitoring
-# EXTERNAL-IP column is the ALB/ELB hostname, port 80
-```
+**https://healthraa-grafana.duckdns.org/** — same shared ingress-nginx +
+static EIP + cert-manager setup as the app (see "Custom domain + HTTPS"
+above), via `kubernetes/grafana-ingress.yaml`. Grafana's own Service was
+switched from `LoadBalancer` to `ClusterIP` (both in the live cluster and in
+the Helm values used for the `prometheus` release) once it moved behind the
+shared ingress — it no longer needs, and isn't billed for, its own
+dedicated ELB.
 
 Login: `admin` / the password set via `--set grafana.adminPassword=...` at
 install time (rotate this in Grafana after first login, or manage it via a

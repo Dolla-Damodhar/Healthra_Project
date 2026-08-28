@@ -178,6 +178,7 @@ for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-depl
                         KUBECTL="kubectl --request-timeout=60s --validate=false"
 
                         $KUBECTL apply -f kubernetes/monitoring-manifests.yaml
+                        $KUBECTL apply -f kubernetes/grafana-ingress.yaml
 
                         # Package the Grafana dashboard JSON as a labeled ConfigMap so the
                         # kube-prometheus-stack Grafana sidecar auto-imports it (searches all
