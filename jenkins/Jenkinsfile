@@ -1,21 +1,30 @@
 pipeline {
     agent any
 
+    // Jenkins only listens on localhost here, so a GitHub webhook can't reach
+    // it. Poll the remote once a minute instead so a push still triggers a
+    // build automatically, just with up to ~1 minute of latency.
+    triggers {
+        pollSCM('* * * * *')
+    }
+
     environment {
         // Add common macOS paths including Python 3.12, Node@24, and docker
         PATH           = "/Library/Frameworks/Python.framework/Versions/3.12/bin:/usr/local/opt/node@24/bin:/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
-        
+
         AWS_ACCOUNT_ID = '447356677831' // Replace with your AWS account ID
         AWS_REGION     = 'us-east-1'     // Replace with your AWS region
         ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        
+        EKS_CLUSTER_NAME = 'healthra-cluster'
+
         BACKEND_REPO   = 'healthra-backend'
         FRONTEND_REPO  = 'healthra-frontend'
-        
-        // Base API URL for frontend compile-time building. 
-        // Replace with your actual domain or ALB endpoint URL.
-        VITE_HEALTHRA_BASEURL = 'http://healthra-api.local/api/' 
-        
+
+        // Relative, not absolute: the ingress serves frontend and backend from
+        // the same ALB host (/ -> frontend, /api -> backend), and auth is
+        // cookie-based, so the frontend must call the API same-origin.
+        VITE_HEALTHRA_BASEURL = '/api/'
+
         IMAGE_TAG      = "${env.GIT_COMMIT.take(7)}"
     }
 
@@ -62,10 +71,16 @@ pipeline {
 
         stage('Build & Push Backend Image') {
             steps {
+                // --platform linux/amd64: this Jenkins agent is Apple Silicon
+                // (arm64), but the EKS nodes are amd64 - without pinning the
+                // platform, docker builds arm64 images that fail on the
+                // cluster with "exec format error". buildx --push builds and
+                // pushes directly, no local image / separate docker push needed.
                 sh """
-                    docker build -t ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG} -t ${ECR_REGISTRY}/${BACKEND_REPO}:latest ./backend
-                    docker push ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}
-                    docker push ${ECR_REGISTRY}/${BACKEND_REPO}:latest
+                    docker buildx build --platform linux/amd64 \
+                        -t ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG} \
+                        -t ${ECR_REGISTRY}/${BACKEND_REPO}:latest \
+                        --push ./backend
                 """
             }
         }
@@ -74,22 +89,41 @@ pipeline {
             steps {
                 // Pass VITE_HEALTHRA_BASEURL as build-arg so Vite compiles it into frontend assets
                 sh """
-                    docker build --build-arg VITE_HEALTHRA_BASEURL=${VITE_HEALTHRA_BASEURL} \
+                    docker buildx build --platform linux/amd64 \
+                        --build-arg VITE_HEALTHRA_BASEURL=${VITE_HEALTHRA_BASEURL} \
                         -t ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG} \
-                        -t ${ECR_REGISTRY}/${FRONTEND_REPO}:latest ./frontend
-                    docker push ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}
-                    docker push ${ECR_REGISTRY}/${FRONTEND_REPO}:latest
+                        -t ${ECR_REGISTRY}/${FRONTEND_REPO}:latest \
+                        --push ./frontend
                 """
+            }
+        }
+
+        stage('Configure kubectl') {
+            steps {
+                // aws eks update-kubeconfig calls the EKS API, and every
+                // subsequent kubectl call re-authenticates via `aws eks
+                // get-token` under the hood - both need real AWS credentials
+                // in the environment, not just during this one stage.
+                withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+                }
             }
         }
 
         stage('Deploy to EKS') {
             steps {
-                sh '''
-                    # Substitute environment placeholders in k8s deployment templates using Python
-                    python3 -c '
+                // aws-credentials: needed for kubectl's aws-iam-authenticator exec plugin.
+                // django-secret-key / db-password: injected into the k8s Secret below.
+                withCredentials([
+                    usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'django-secret-key', variable: 'DJANGO_SECRET_KEY'),
+                    string(credentialsId: 'db-password', variable: 'DB_PASSWORD')
+                ]) {
+                    sh '''
+                        # Substitute environment placeholders in k8s templates using Python
+                        python3 -c '
 import sys
-for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-deployment.yaml"]:
+for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-deployment.yaml", "kubernetes/migrate-job.yaml"]:
     with open(filepath, "r") as f:
         content = f.read()
     content = content.replace("${AWS_ACCOUNT_ID}", sys.argv[1])
@@ -97,30 +131,64 @@ for filepath in ["kubernetes/backend-deployment.yaml", "kubernetes/frontend-depl
     content = content.replace("${IMAGE_TAG}", sys.argv[3])
     with open(filepath, "w") as f:
         f.write(content)
-                    ' "${AWS_ACCOUNT_ID}" "${AWS_REGION}" "${IMAGE_TAG}"
-                    
-                    # Apply Kubernetes manifests
-                    kubectl apply -f kubernetes/namespace.yaml
-                    kubectl apply -f kubernetes/secrets.yaml
-                    kubectl apply -f kubernetes/backend-service.yaml
-                    kubectl apply -f kubernetes/backend-deployment.yaml
-                    kubectl apply -f kubernetes/frontend-service.yaml
-                    kubectl apply -f kubernetes/frontend-deployment.yaml
-                    kubectl apply -f kubernetes/ingress.yaml
-                    
-                    # Verify deployment rollout
-                    kubectl rollout status deployment/healthra-backend -n healthra --timeout=150s
-                    kubectl rollout status deployment/healthra-frontend -n healthra --timeout=150s
-                '''
+                        ' "${AWS_ACCOUNT_ID}" "${AWS_REGION}" "${IMAGE_TAG}"
+
+                        # Apply Kubernetes manifests
+                        kubectl apply -f kubernetes/namespace.yaml
+                        kubectl apply -f kubernetes/configmap.yaml
+
+                        # Generate the real Secret from Jenkins credentials at deploy time
+                        # (production secret values never live in git - see kubernetes/secrets.yaml)
+                        kubectl create secret generic healthra-secrets -n healthra \
+                            --from-literal=django-secret-key="$DJANGO_SECRET_KEY" \
+                            --from-literal=db-password="$DB_PASSWORD" \
+                            --dry-run=client -o yaml | kubectl apply -f -
+
+                        # Run DB migrations against RDS before rolling out new backend pods
+                        kubectl delete job healthra-migrate -n healthra --ignore-not-found
+                        kubectl apply -f kubernetes/migrate-job.yaml
+                        kubectl wait --for=condition=complete job/healthra-migrate -n healthra --timeout=180s
+
+                        kubectl apply -f kubernetes/backend-service.yaml
+                        kubectl apply -f kubernetes/backend-deployment.yaml
+                        kubectl apply -f kubernetes/frontend-service.yaml
+                        kubectl apply -f kubernetes/frontend-deployment.yaml
+                        kubectl apply -f kubernetes/ingress.yaml
+
+                        # Verify deployment rollout
+                        kubectl rollout status deployment/healthra-backend -n healthra --timeout=150s
+                        kubectl rollout status deployment/healthra-frontend -n healthra --timeout=150s
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Monitoring') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'aws-credentials', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh '''
+                        kubectl apply -f kubernetes/monitoring-manifests.yaml
+
+                        # Package the Grafana dashboard JSON as a labeled ConfigMap so the
+                        # kube-prometheus-stack Grafana sidecar auto-imports it (searches all
+                        # namespaces for configmaps labeled grafana_dashboard=1).
+                        kubectl create configmap healthra-grafana-dashboard -n healthra \
+                            --from-file=healthra-dashboard.json=kubernetes/grafana-dashboard.json \
+                            --dry-run=client -o yaml \
+                            | kubectl label --local -f - grafana_dashboard=1 -o yaml \
+                            | kubectl apply -f -
+                    '''
+                }
             }
         }
     }
 
     post {
         always {
-            // Clean up workspace images to save disk space on Jenkins runner
-            sh "docker rmi ${ECR_REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG} || true"
-            sh "docker rmi ${ECR_REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG} || true"
+            // buildx --push builds and pushes without loading images into the
+            // local docker daemon, so there's nothing to docker rmi here.
+            // Trim the buildx cache instead so it doesn't grow unbounded.
+            sh 'docker buildx prune -f --filter until=24h || true'
         }
         success {
             echo 'Deployment completed successfully!'

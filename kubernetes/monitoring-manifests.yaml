@@ -13,20 +13,11 @@ spec:
   - port: http
     path: /metrics
     interval: 15s
----
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: healthra-frontend-monitor
-  namespace: healthra
-  labels:
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: healthra-frontend
-  endpoints:
-  - port: http
-    path: /
-    interval: 30s
+
+# No ServiceMonitor for healthra-frontend: nginx serves the React app (HTML)
+# on "/", not Prometheus text format, so scraping it as metrics would only
+# show as a failed target in Prometheus. Frontend CPU/memory are already
+# covered by kube-prometheus-stack's cAdvisor scraping (see the "Memory
+# Usage" / "CPU Usage" panels in grafana-dashboard.json), which works off
+# container-level metrics rather than an app-exposed /metrics endpoint.
 

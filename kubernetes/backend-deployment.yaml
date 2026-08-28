@@ -22,7 +22,11 @@ spec:
       containers:
       - name: backend
         image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/healthra-backend:${IMAGE_TAG}
-        imagePullPolicy: IfNotPresent
+        # Always, not IfNotPresent: IMAGE_TAG is a mutable, reused ECR tag
+        # (e.g. after a hotfix rebuild without an app change), so nodes must
+        # re-check the registry rather than trust a same-tag image cached
+        # locally from a previous, possibly different, build.
+        imagePullPolicy: Always
         ports:
         - containerPort: 8000
           name: http
@@ -37,18 +41,30 @@ spec:
         - name: ALLOWED_HOSTS
           value: "*"
         - name: DB_NAME
-          value: "healthra"
+          valueFrom:
+            configMapKeyRef:
+              name: healthra-config
+              key: db-name
         - name: DB_USER
-          value: "postgres"
+          valueFrom:
+            configMapKeyRef:
+              name: healthra-config
+              key: db-user
         - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:
               name: healthra-secrets
               key: db-password
         - name: DB_HOST
-          value: "healthra-db.cjdxxcr.us-east-1.rds.amazonaws.com"  # Replace with actual RDS host or local DB service
+          valueFrom:
+            configMapKeyRef:
+              name: healthra-config
+              key: db-host
         - name: DB_PORT
-          value: "5432"
+          valueFrom:
+            configMapKeyRef:
+              name: healthra-config
+              key: db-port
         - name: CORS_ALLOWED_ORIGINS
           value: "http://localhost,http://127.0.0.1" # Overwritten by deployment domain
         - name: CSRF_TRUSTED_ORIGINS

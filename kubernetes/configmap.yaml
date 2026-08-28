@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: healthra-config
+  namespace: healthra
+data:
+  # Single source of truth for DB connection settings shared by the backend
+  # Deployment and the migration Job, so they can't drift out of sync.
+  db-host: "healthra-db.cg9uuu4kqdg3.us-east-1.rds.amazonaws.com"
+  db-name: "healthra"
+  db-user: "postgres"
+  db-port: "5432"

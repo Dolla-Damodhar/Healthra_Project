@@ -22,7 +22,11 @@ spec:
       containers:
       - name: frontend
         image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/healthra-frontend:${IMAGE_TAG}
-        imagePullPolicy: IfNotPresent
+        # Always, not IfNotPresent: IMAGE_TAG is a mutable, reused ECR tag
+        # (e.g. after a hotfix rebuild without an app change), so nodes must
+        # re-check the registry rather than trust a same-tag image cached
+        # locally from a previous, possibly different, build.
+        imagePullPolicy: Always
         ports:
         - containerPort: 80
           name: http
